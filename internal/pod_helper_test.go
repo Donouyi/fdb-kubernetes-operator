@@ -687,6 +687,103 @@ var _ = Describe("pod_helper", func() {
 				},
 			},
 		),
+		Entry(
+			"Label referenced from topologySpreadConstraints.matchLabelKeys is preserved when desired metadata carries a newer value",
+			testCase{
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							fdbv1beta2.LastSpecKey:         "1",
+							fdbv1beta2.ImageTypeAnnotation: string(fdbv1beta2.ImageTypeSplit),
+							fdbv1beta2.IPFamilyAnnotation: strconv.Itoa(
+								fdbv1beta2.PodIPFamilyUnset,
+							),
+						},
+						Labels: map[string]string{
+							"example.com/app-generation": "old-hash",
+						},
+					},
+					Spec: corev1.PodSpec{
+						TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+							{
+								MaxSkew:           1,
+								TopologyKey:       "topology.kubernetes.io/zone",
+								WhenUnsatisfiable: corev1.DoNotSchedule,
+								MatchLabelKeys:    []string{"example.com/app-generation"},
+							},
+						},
+					},
+				},
+				metadata: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						fdbv1beta2.LastSpecKey:         "1",
+						fdbv1beta2.ImageTypeAnnotation: string(fdbv1beta2.ImageTypeSplit),
+						fdbv1beta2.IPFamilyAnnotation:  strconv.Itoa(fdbv1beta2.PodIPFamilyUnset),
+					},
+					Labels: map[string]string{
+						"example.com/app-generation": "new-hash",
+					},
+				},
+				expected: true,
+				expectedMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						fdbv1beta2.LastSpecKey:         "1",
+						fdbv1beta2.ImageTypeAnnotation: string(fdbv1beta2.ImageTypeSplit),
+						fdbv1beta2.IPFamilyAnnotation:  strconv.Itoa(fdbv1beta2.PodIPFamilyUnset),
+					},
+					Labels: map[string]string{
+						"example.com/app-generation": "old-hash",
+					},
+				},
+			},
+		),
+		Entry(
+			"Label referenced from topologySpreadConstraints.matchLabelKeys is added when missing from the existing pod",
+			testCase{
+				pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							fdbv1beta2.LastSpecKey:         "1",
+							fdbv1beta2.ImageTypeAnnotation: string(fdbv1beta2.ImageTypeSplit),
+							fdbv1beta2.IPFamilyAnnotation: strconv.Itoa(
+								fdbv1beta2.PodIPFamilyUnset,
+							),
+						},
+					},
+					Spec: corev1.PodSpec{
+						TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+							{
+								MaxSkew:           1,
+								TopologyKey:       "topology.kubernetes.io/zone",
+								WhenUnsatisfiable: corev1.DoNotSchedule,
+								MatchLabelKeys:    []string{"example.com/app-generation"},
+							},
+						},
+					},
+				},
+				metadata: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						fdbv1beta2.LastSpecKey:         "1",
+						fdbv1beta2.ImageTypeAnnotation: string(fdbv1beta2.ImageTypeSplit),
+						fdbv1beta2.IPFamilyAnnotation:  strconv.Itoa(fdbv1beta2.PodIPFamilyUnset),
+					},
+					Labels: map[string]string{
+						"example.com/app-generation": "new-hash",
+					},
+				},
+				expected: false,
+				expectedMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						fdbv1beta2.LastSpecKey:         "1",
+						fdbv1beta2.ImageTypeAnnotation: string(fdbv1beta2.ImageTypeSplit),
+						fdbv1beta2.IPFamilyAnnotation:  strconv.Itoa(fdbv1beta2.PodIPFamilyUnset),
+					},
+					Labels: map[string]string{
+						"example.com/app-generation": "new-hash",
+					},
+				},
+			},
+		),
 		Entry("Metadata for a Pod running on a node",
 			testCase{
 				pod: &corev1.Pod{
