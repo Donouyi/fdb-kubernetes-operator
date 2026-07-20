@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2021 Apple Inc. and the FoundationDB project authors
+ * Copyright 2018-2026 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
+	"slices"
 	"strconv"
 
 	"k8s.io/utils/ptr"
@@ -105,9 +107,41 @@ func GetPodSpecHash(
 	return GetJSONHash(spec)
 }
 
+// PodGenerationHashLength is the number of hex characters returned by
+// GetPodGenerationHash — fits under Kubernetes' 63-char label value limit
+// while giving 64 bits of entropy.
+const PodGenerationHashLength = 16
+
+// GetPodGenerationHash returns a class-scoped hash of the rendered PodSpec,
+// truncated to PodGenerationHashLength hex characters for direct use as a
+// Kubernetes label value. The spec is rendered with a sentinel
+// ProcessGroupID so every pod of the same class produces the same hash;
+// any field that flows into GetPodSpec contributes automatically. The hash
+// is computed from the same source LastSpecKey uses to drive pod
+// replacement, so it rotates exactly when the rendered PodSpec for the
+// class changes. See PodTemplateGenerationLabel for the consumer.
+func GetPodGenerationHash(
+	cluster *fdbv1beta2.FoundationDBCluster,
+	processClass fdbv1beta2.ProcessClass,
+) (string, error) {
+	canonical := &fdbv1beta2.ProcessGroupStatus{
+		ProcessClass:   processClass,
+		ProcessGroupID: fdbv1beta2.ProcessGroupID(string(processClass) + "-generation"),
+	}
+	spec, err := GetPodSpec(cluster, canonical)
+	if err != nil {
+		return "", err
+	}
+	hash, err := GetJSONHash(spec)
+	if err != nil {
+		return "", err
+	}
+	return hash[:PodGenerationHashLength], nil
+}
+
 // GetJSONHash serializes an object to JSON and takes a hash of the resulting
 // JSON.
-func GetJSONHash(object interface{}) (string, error) {
+func GetJSONHash(object any) (string, error) {
 	hash := sha256.New()
 	encoder := json.NewEncoder(hash)
 	err := encoder.Encode(object)
@@ -126,9 +160,7 @@ func GetPodLabels(
 ) map[string]string {
 	labels := map[string]string{}
 
-	for key, value := range cluster.GetMatchLabels() {
-		labels[key] = value
-	}
+	maps.Copy(labels, cluster.GetMatchLabels())
 
 	if processClass != "" {
 		for _, label := range cluster.GetProcessClassLabels() {
@@ -153,9 +185,7 @@ func GetPodMatchLabels(
 ) map[string]string {
 	labels := map[string]string{}
 
-	for key, value := range cluster.GetMatchLabels() {
-		labels[key] = value
-	}
+	maps.Copy(labels, cluster.GetMatchLabels())
 
 	if processClass != "" {
 		labels[cluster.GetProcessClassLabel()] = string(processClass)
@@ -349,10 +379,8 @@ func GetIPFamily(pod *corev1.Pod) (int, error) {
 func PodHasSidecarTLS(pod *corev1.Pod) bool {
 	for _, container := range pod.Spec.Containers {
 		if container.Name == fdbv1beta2.SidecarContainerName {
-			for _, arg := range container.Args {
-				if arg == "--tls" {
-					return true
-				}
+			if slices.Contains(container.Args, "--tls") {
+				return true
 			}
 		}
 	}
@@ -398,6 +426,24 @@ func podMetadataCorrect(desiredMetadata metav1.ObjectMeta, pod *corev1.Pod) (boo
 		return false, err
 	}
 	desiredMetadata.Annotations[fdbv1beta2.IPFamilyAnnotation] = strconv.Itoa(ipFamily)
+
+	// Preserve PodTemplateGenerationLabel on surviving pods. When opted in via
+	// LabelConfig.IncludePodTemplateGenerationLabel, this label participates
+	// in scheduling decisions through TSC matchLabelKeys; rewriting it in
+	// place on a surviving pod would let the scheduler see all surviving pods
+	// as one generation during a rolling update. It rotates only when
+	// updatePods deletes the pod and addPods recreates it with the new spec
+	// — same pattern as fdbv1beta2.LastSpecKey above.
+	if value, ok := pod.ObjectMeta.Labels[fdbv1beta2.PodTemplateGenerationLabel]; ok {
+		if desiredMetadata.Labels == nil {
+			desiredMetadata.Labels = make(map[string]string)
+		}
+		desiredMetadata.Labels[fdbv1beta2.PodTemplateGenerationLabel] = value
+	} else {
+		// Pod predates the label; don't patch it in place. The label will be
+		// applied naturally on recreation.
+		delete(desiredMetadata.Labels, fdbv1beta2.PodTemplateGenerationLabel)
+	}
 
 	return MetadataCorrect(desiredMetadata, &pod.ObjectMeta), nil
 }

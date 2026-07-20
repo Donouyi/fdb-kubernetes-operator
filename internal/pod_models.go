@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2019 Apple Inc. and the FoundationDB project authors
+ * Copyright 2018-2026 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ package internal
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -115,6 +116,31 @@ func GetService(
 	}, nil
 }
 
+// podTemplateGenerationValue returns the value to stamp under
+// fdbv1beta2.PodTemplateGenerationLabel for a process group's new pod. A
+// process group being removed gets the PodTemplateGenerationRemovalValue
+// sentinel so its (doomed) pod is bucketed away from any live generation and
+// cannot skew the surviving cohort's topology spread; every other pod gets the
+// rendered-PodSpec generation hash.
+func podTemplateGenerationValue(
+	cluster *fdbv1beta2.FoundationDBCluster,
+	processGroup *fdbv1beta2.ProcessGroupStatus,
+) (string, error) {
+	// ProcessGroupIsBeingRemoved (rather than processGroup.IsMarkedForRemoval)
+	// so the sentinel also applies in the window after a group is listed in
+	// spec.processGroupsToRemove[WithoutExclusion] but before its status
+	// removal timestamp is set: with DNS in the cluster file, addPods runs
+	// before updateStatus, so a pod recreated in that window would otherwise
+	// get the live generation hash and never be corrected. addPods always
+	// passes a cluster.Status.ProcessGroups element, so this also covers
+	// status-marked groups.
+	if cluster.ProcessGroupIsBeingRemoved(processGroup.ProcessGroupID) {
+		return fdbv1beta2.PodTemplateGenerationRemovalValue, nil
+	}
+
+	return GetPodGenerationHash(cluster, processGroup.ProcessClass)
+}
+
 // GetPod builds a pod for a new process group
 func GetPod(
 	cluster *fdbv1beta2.FoundationDBCluster,
@@ -139,6 +165,21 @@ func GetPod(
 	)
 	metadata.Name = processGroup.GetPodName(cluster)
 	metadata.OwnerReferences = owner
+
+	// The generation label is only stamped at pod-creation time. Reconcile
+	// passes preserve the existing value via the carve-out in
+	// podMetadataCorrect, so there's no need to recompute it on every
+	// PodMetadataCorrect call.
+	if cluster.ShouldIncludePodTemplateGenerationLabel() {
+		generation, err := podTemplateGenerationValue(cluster, processGroup)
+		if err != nil {
+			return nil, err
+		}
+		if metadata.Labels == nil {
+			metadata.Labels = make(map[string]string)
+		}
+		metadata.Labels[fdbv1beta2.PodTemplateGenerationLabel] = generation
+	}
 
 	return &corev1.Pod{
 		ObjectMeta: metadata,
@@ -360,9 +401,7 @@ func setAffinityForFaultDomain(
 		}
 
 		labelSelectors := make(map[string]string, len(cluster.GetMatchLabels())+1)
-		for key, value := range cluster.GetMatchLabels() {
-			labelSelectors[key] = value
-		}
+		maps.Copy(labelSelectors, cluster.GetMatchLabels())
 
 		processClassLabel := cluster.GetProcessClassLabel()
 		labelSelectors[processClassLabel] = string(processClass)
@@ -1119,12 +1158,11 @@ func GetBackupDeployment(backup *fdbv1beta2.FoundationDBBackup) (*appsv1.Deploym
 	deployment.ObjectMeta.OwnerReferences = BuildOwnerReference(backup.TypeMeta, backup.ObjectMeta)
 
 	if backup.Spec.BackupDeploymentMetadata != nil {
-		for key, value := range backup.Spec.BackupDeploymentMetadata.Labels {
-			deployment.ObjectMeta.Labels[key] = value
-		}
-		for key, value := range backup.Spec.BackupDeploymentMetadata.Annotations {
-			deployment.ObjectMeta.Annotations[key] = value
-		}
+		maps.Copy(deployment.ObjectMeta.Labels, backup.Spec.BackupDeploymentMetadata.Labels)
+		maps.Copy(
+			deployment.ObjectMeta.Annotations,
+			backup.Spec.BackupDeploymentMetadata.Annotations,
+		)
 	}
 	deployment.ObjectMeta.Labels[fdbv1beta2.BackupDeploymentLabel] = string(backup.ObjectMeta.UID)
 
@@ -1413,13 +1451,9 @@ func GetObjectMetadata(
 		metadata.Labels = make(map[string]string)
 	}
 
-	for label, value := range GetPodLabels(cluster, processClass, string(id)) {
-		metadata.Labels[label] = value
-	}
+	maps.Copy(metadata.Labels, GetPodLabels(cluster, processClass, string(id)))
 
-	for label, value := range cluster.GetResourceLabels() {
-		metadata.Labels[label] = value
-	}
+	maps.Copy(metadata.Labels, cluster.GetResourceLabels())
 
 	return *metadata
 }

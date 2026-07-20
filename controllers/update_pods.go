@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2019-2023 Apple Inc. and the FoundationDB project authors
+ * Copyright 2018-2026 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -393,10 +393,23 @@ func getPodsToUpdate(
 			continue
 		}
 
-		logger.Info(
-			"Update Pod",
+		updateArgs := []any{
 			"processGroupID",
 			processGroup.ProcessGroupID,
+			"processClass",
+			processGroup.ProcessClass,
+			"podName",
+			pod.Name,
+			"nodeName",
+			pod.Spec.NodeName,
+		}
+		if cluster.ShouldIncludePodTemplateGenerationLabel() {
+			updateArgs = append(updateArgs,
+				"oldPodTemplateGeneration",
+				pod.ObjectMeta.Labels[fdbv1beta2.PodTemplateGenerationLabel],
+			)
+		}
+		updateArgs = append(updateArgs,
 			"reason",
 			fmt.Sprintf(
 				"specHash has changed from %s to %s",
@@ -404,6 +417,7 @@ func getPodsToUpdate(
 				pod.ObjectMeta.Annotations[fdbv1beta2.LastSpecKey],
 			),
 		)
+		logger.Info("Update Pod", updateArgs...)
 
 		podClient, message := reconciler.getPodClient(cluster, pod)
 		if podClient == nil {
